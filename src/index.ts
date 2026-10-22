@@ -28,7 +28,7 @@ import { runTests } from "./sandbox/testRunner.js";
 import { combineStageResults, extractErrorMessages, recordAttempt, shouldRetry, startReflection } from "./sandbox/reflector.js";
 import { createRefactorBranch, commitFile, getCurrentBranch } from "./vcs/gitManager.js";
 import { getUnifiedDiff, formatDiffReport, type TaskSummaryEntry } from "./vcs/diffGenerator.js";
-import type { FileParseResult } from "./types/ast.types.js";
+import type { FileParseResult, ParsedNode } from "./types/ast.types.js";
 import type { StageResult, VerificationResult } from "./types/verification.types.js";
 
 export interface PipelineOptions {
@@ -66,6 +66,23 @@ async function verifyTask(filePath: string, targetDir: string, runTestSuite: boo
   }
 
   return combineStageResults(filePath, stages);
+}
+
+/**
+ * A short, conventional commit message: one subject line naming the function
+ * and what was wrong with it, and a body saying how it was produced and
+ * checked. (The LLM instruction itself is NOT used — for .js files it contains
+ * a long paragraph of prompt guidance that has no place in a git log.)
+ */
+function buildCommitMessage(node: ParsedNode, relativePath: string, ranTests: boolean): string {
+  const smells = [...new Set(node.smells.map((s) => s.type))].join(", ");
+  const file = relativePath.split(path.sep).join("/");
+  return [
+    `refactor(${file}): ${node.name} — ${smells}`,
+    "",
+    `Automated by autorefactor-ai (${describeModel(pickModelTier(node))}).`,
+    `Verified: type check, lint${ranTests ? ", tests" : ""}.`,
+  ].join("\n");
 }
 
 export async function runPipeline(options: PipelineOptions): Promise<PipelineResult> {
@@ -191,7 +208,11 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
     if (verified) {
       if (!options.skipGit) {
         // eslint-disable-next-line no-await-in-loop
-        await commitFile(options.targetDir, path.relative(options.targetDir, task.filePath), `Refactor: ${objective.instruction}`);
+        await commitFile(
+          options.targetDir,
+          path.relative(options.targetDir, task.filePath),
+          buildCommitMessage(targetNode, path.relative(options.targetDir, task.filePath), options.runTestSuite ?? false),
+        );
       }
       // Later tasks in this file must see the code as it is now.
       const [fresh] = parseFiles([task.filePath]);

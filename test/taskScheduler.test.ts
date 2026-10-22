@@ -5,7 +5,7 @@ import { buildDependencyGraph, createDependencyGraph } from "../src/parser/depen
 import { scheduleTasks } from "../src/planner/taskScheduler.js";
 import type { FileParseResult, ParsedNode } from "../src/types/ast.types.js";
 
-const targetPath = (name: string) => path.resolve("test-target/src", name);
+const targetPath = (name: string) => path.resolve("test/fixtures/legacy", name);
 
 function makeNode(overrides: Partial<ParsedNode>): ParsedNode {
   return {

@@ -1,131 +1,111 @@
-# ⚡ AutoRefactor AI: Autonomous Agentic Codebase Refactoring Engine
+# autorefactor-ai
 
-> A closed-loop, neurosymbolic software engineering agent that refactors legacy codebases using Concrete Syntax Trees (CST), repository-scale dependency graphs, and autonomous self-healing compiler loops.
+A token-efficient, agentic refactoring CLI for legacy JavaScript/TypeScript. It
+finds what is worth fixing, asks an LLM for a **minimal patch per function**
+(not per file), checks each patch with real tools, retries with the real error
+if a check fails, and commits every verified fix as its own commit.
 
-## Status
+```
+autorefactor analyze ./src          # read-only: what would change, and why
+autorefactor run ./src              # fix, verify, retry, commit
+autorefactor check-llm              # one test call: is my key/model working?
+```
 
-This is the project skeleton. Module stubs exist under `src/` with typed
-signatures and `not yet implemented` throws — see the build order below.
+## Install
 
-## Setup
+```bash
+npm install -g autorefactor-ai       # requires Node 18.18+
+autorefactor --version
+```
+
+From a clone: `npm install && npm run build && npm link`.
+
+## Quick start (free Gemini key)
+
+1. Get a key at <https://aistudio.google.com/app/apikey>.
+2. Put settings in `~/.autorefactor/.env` (read from anywhere) or in a `.env`
+   in the folder you run from (takes priority):
+   ```
+   LLM_PROVIDER=google
+   GOOGLE_GENERATIVE_AI_API_KEY=your-key
+   LLM_MODEL_CHEAP=gemini-3.5-flash-lite
+   LLM_MODEL_CAPABLE=gemini-3.8-flash
+   ```
+   Model names change and old ones are retired; confirm them in AI Studio.
+3. `autorefactor check-llm` — confirms the key and model work.
+4. `autorefactor analyze ./src`, then `autorefactor run ./src --no-git`.
+
+> Free tiers may use your prompts to improve the provider's products. Don't run
+> them on confidential code. Secret-shaped strings (API keys, tokens) are
+> redacted before anything is sent, but proprietary logic is not.
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `analyze <target>` | Lists findings, processing order, which fixes clear the priority threshold, and an estimate of tokens. Never calls an LLM or changes a file. |
+| `run <target>` | The full pipeline. Refuses to start if your LLM settings are missing or the git tree has uncommitted changes. |
+| `check-llm [cheap\|capable]` | One small call with your settings; prints timing, tokens, retries, or the exact API error. |
+
+`run` options: `--no-git` (apply patches without branching/committing),
+`--run-tests` (also run the target's own Jest suite as a verification step),
+`--max-retries <n>` (default 3), `--min-score <n>` (priority threshold, default 15).
+
+With git on, fixes go to a new `agent/refactor-<timestamp>` branch, one commit
+per fix, and a markdown report is written to `.autorefactor-work/`.
+
+## How it works
+
+1. **Parse** — builds a syntax tree per file (ts-morph), detects smells
+   (untyped signatures, callback nesting, `var`, missing error handling, high
+   cyclomatic complexity).
+2. **Order** — builds the import graph and fixes dependencies before their users.
+3. **Plan** — scores each finding (complexity × impact × size × smells, dampened)
+   and skips low-value ones entirely, which saves whole LLM calls.
+4. **Slice** — sends only the target function plus the helpers it actually calls
+   (signature only when large), not the whole file.
+5. **Generate** — routes simple fixes to a cheap model and hard ones to a capable
+   one; output is forced into a strict schema.
+6. **Verify** — type-checks, lints (including a custom rule against a real
+   callback-conversion bug), and optionally runs your tests. On failure the
+   original file is restored and the real error is sent back for a retry.
+7. **Deliver** — commits each verified fix; reports measured token usage.
+
+Token use is measured from the API's own counts (`API usage (measured)`), not
+only estimated.
+
+## Configuration
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `LLM_PROVIDER` | `anthropic`, `openai` or `google` | `anthropic` |
+| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GOOGLE_GENERATIVE_AI_API_KEY` | key for the chosen provider | — |
+| `LLM_MODEL_CHEAP` / `LLM_MODEL_CAPABLE` | model per tier (required for openai/google) | built in for anthropic |
+| `LLM_API_RETRIES` | retries on rate limits / server errors | 5 |
+| `LLM_RETRY_BASE_MS` | first backoff delay, doubles each retry | 2000 |
+| `LLM_TIMEOUT_MS` | cap on one call including retries | 180000 |
+
+## Limitations
+
+- **Verified means checked, not proven.** A patch must type-check, lint and pass
+  the tests you point it at. Behaviour changes that no test covers can still
+  slip through, so review the diff.
+- Plain `.js` files get types as JSDoc; `.ts`/`.jsx` files are not linted
+  (reported as skipped). The `--run-tests` stage supports Jest only.
+- "Impact" is measured per file, not per function.
+- Only the Google provider has been exercised against a live API so far.
+
+## Development
 
 ```bash
 npm install
-cp .env.example .env   # fill in ANTHROPIC_API_KEY / OPENAI_API_KEY
+npm test               # needs: cd test-target && npm install   (once)
+npm run typecheck
+npm run cli -- analyze test-target/src
+npm run build          # compiles to dist/
+npm pack --dry-run     # shows exactly what would be published
 ```
 
-## Build order
+## License
 
-1. `src/types/` — shared interfaces (done)
-2. `src/parser/` — ts-morph AST engine + dependency graph
-3. `src/planner/` — task scheduler + context slicer
-4. `src/agent/` — LLM client, Zod tool schemas, ReAct loop
-5. `src/sandbox/` — process runner, type checker, linter, test runner, reflector
-6. `src/vcs/` — git manager, diff generator, PR generator
-7. `src/cli/` — Commander.js commands wiring it together
-8. `src/server/` — live visualizer dashboard (SSE)
-
-## Try it against the sample target
-
-`test-target/` contains a small legacy JS codebase (`legacyCallback.js`,
-`mathUtils.js`, `userController.js`) with a passing Jest test, used to
-verify the pipeline produces zero behavioral regressions.
-
-See the architecture overview and comparison matrix in the original
-project spec for full technical detail.
-
-
-/** Project Readme/
-
-# TokenCLI: Context-Aware Token-Optimized Developer Engine
-
-An intelligent, lightweight Command-Line Interface (CLI) developer engine designed to reduce LLM token overhead by **35% to 55%** while maximizing inference speed, code reasoning accuracy, and developer throughput.
-
----
-
-## 1. Problem Statement
-
-Modern Large Language Models (LLMs) have transformed software engineering workflows. However, direct integration into developer tooling suffers from critical systemic inefficiencies:
-
-* **Massive Token Waste & Bloat:** Typical developer queries dump full source files, boilerplate code, verbose docstrings, and large imports into prompt payloads, consuming unnecessary tokens.
-* **Prohibitive Inference Costs:** High token counts exponentially inflate API consumption costs, making continuous terminal/CI-CD workflows commercially unsustainable.
-* **Context Dilution ("Lost in the Middle"):** Supplying unstructured, excessive context lowers model reasoning accuracy, leading to hallucinations and inaccurate diffs.
-* **Latency Bottlenecks & Rate Limiting:** Large payloads drastically increase Time-to-First-Token (TTFT), degrading terminal UX and triggering frequent Tokens-Per-Minute (TPM) 429 throttling errors.
-
----
-
-## 2. Existing Solutions
-
-| Category | Typical Tools | Key Limitations |
-| :--- | :--- | :--- |
-| **Web-Based LLM Interfaces** | ChatGPT, Claude Web, Gemini Web | Manual copy-pasting; breaks keyboard-first terminal workflow; no direct access to local Git diffs or filesystem. |
-| **Heavy IDE Copilots / Plugins** | GitHub Copilot, Cursor | Monolithic background indexing; lack of granular user control over token budgets and context pruning. |
-| **Generic CLI Wrappers** | Basic API shell wrappers | Naive payload transmission without syntax-aware compression, AST parsing, or local sanitization. |
-
----
-
-## 3. Proposed Solution
-
-A high-performance CLI utility that sits directly between the local developer environment and LLM endpoints, applying deterministic pre-flight token reduction before API dispatch.
-
-## 3. Proposed Solution
-
-TokenCLI acts as a lightweight pre-flight compression proxy on your local machine. Before any prompt leaves your terminal, it deterministically extracts only the essential code and data needed for the task, cutting payload size in half.
-
-### How It Works in 4 Steps:
-
-1. **Local Context Capture:** The CLI inspects only the target workspace files, git changes (`git diff -U2`), or terminal error logs.
-2. **Deterministic Pre-Flight Compression:**
-   * **AST Skeletons:** Removes function bodies and implementation details, keeping only exported functions, classes, and types.
-   * **Diff Slicing:** Isolates the exact lines changed rather than attaching entire source files.
-   * **Relevance Filtering:** Pulls in only directly referenced dependencies using fast local indexing.
-   * **Secret Redaction:** Strips `.env` keys and sensitive tokens on your device before network transmission.
-3. **Dynamic Model Routing:** Automatically dispatches quick/simple fixes to lightweight, low-cost models (e.g., Flash / Mini) and reserves large reasoning models for complex refactors.
-4. **Fast Terminal Streaming:** Delivers the optimized response directly into your terminal output in real time without lag.
-
-
-### Core Architecture Highlights
-* **Abstract Syntax Tree (AST) Pruning:** Strips non-essential function implementations from dependencies, preserving only exported signatures, types, and interfaces.
-* **Targeted Unified Diff Slicing:** Extracts precise git diff ranges (`git diff -U2`) instead of full file buffers.
-* **Context Relevance Scoring:** Uses fast local lexical/vector search to supply only actively referenced modules.
-* **Local Secret & Privacy Guard:** Strips API credentials, private tokens, and environment variables on the client side before network dispatch.
-
----
-
-## 4. How It Is Better
-
-| Feature / Metric | Standard CLI / Raw LLM Tool | TokenCLI Engine | Net Benefit |
-| :--- | :--- | :--- | :--- |
-| **Token Payload Overhead** | 100% (Raw, uncompressed context) | **45% - 65% of original** | **35% - 55% Token Reduction** |
-| **Average Response Latency** | 2.8s - 5.5s (High TTFT) | **0.8s - 1.6s (Instant stream)** | **~3x Faster Terminal Output** |
-| **API Cost per Query** | High ($$$) | Low ($) | **Direct 40%+ Cost Savings** |
-| **Context Signal-to-Noise** | Low (Boilerplate-heavy) | High (Relevant symbols only) | **Fewer Hallucinations** |
-| **TPM / Rate Limit Safety** | High frequency of 429 errors | Optimized throughput headroom | **Continuous Developer Flow** |
-| **Local Environment Safety** | Potential key leakage | Pre-flight regex & entropy scrub | **Zero Secret Exfiltration** |
-
----
-
-## 5. Future Advancements
-
-* **Client-Side Edge SLMs:** Embed lightweight local models (e.g., Llama 3 / Qwen 2.5 0.5B via ONNX/WASM) directly in the CLI to filter and summarize context with zero API cost.
-* **Semantic Vector Prompt Caching:** Cache embeddings and recurring code abstractions locally to eliminate redundant context calls across repeat commands.
-* **Bi-Directional AST Patching:** Provide auto-apply CLI commands (`tokencli apply`) that parse LLM output directly back into the code tree with automated verification and formatting.
-* **CI/CD Quality & Token Gatekeeper:** Pre-commit hooks and GitHub Actions integrations to audit token budgets on team pull requests.
-
----
-
-## 6. Tech Stacks
-
-### CLI & Application Core
-* **Language & Runtime:** Node.js (TypeScript)
-* **CLI Framework:** Commander.js 
-* **Terminal UI / UX:** Chalk, Ink, Ora, Boxen
-
-### Code Analysis & Optimization Engine
-* **AST Parsing:** Tree-sitter / Babel Parser / SWC
-* **Local Search & Retrieval:** BM25 / MiniSearch / Orama (Local Vector Search)
-* **Diff Engine:** Git-diff-parser, Diff2Html
-
-### LLM Orchestration & APIs
-* **SDKs & Providers:** LangChain / Vercel AI SDK, OpenAI API, Anthropic SDK, Google Gen AI SDK
-* **Output Enforcement:** Zod / Structured JSON Schemas
+MIT

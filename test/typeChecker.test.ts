@@ -54,8 +54,8 @@ describe("typeCheckFile", () => {
 
   it("catches a real injected bug in the actual sample codebase without affecting a sibling file", () => {
     const project = createVerificationProject();
-    const mathUtilsPath = path.resolve("test-target/src/mathUtils.js");
-    const userControllerPath = path.resolve("test-target/src/userController.js");
+    const mathUtilsPath = path.resolve("test/fixtures/legacy/mathUtils.js");
+    const userControllerPath = path.resolve("test/fixtures/legacy/userController.js");
     project.addSourceFileAtPath(mathUtilsPath);
     project.addSourceFileAtPath(userControllerPath);
 

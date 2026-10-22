@@ -294,4 +294,21 @@ describe("runPipeline — end to end (LLM call mocked, everything else real)", (
     expect(result.taskOutcomes[0].passed).toBe(true);
     expect(messages.some((m) => m.includes("⚠") && m.includes("Lint skipped"))).toBe(true);
   });
+
+  it("commits each fix with a short, readable message — not the LLM instruction", async () => {
+    vi.mocked(runRefactorTask).mockResolvedValue({
+      tool: "propose_patch",
+      payload: { taskId: "t", targetNodeId: "n", newSourceText: "/**\n * @param {number} a\n * @param {number} b\n * @returns {number}\n */\nfunction add(a, b) {\n  return a + b;\n}", explanation: "x" },
+    });
+
+    await runPipeline({ targetDir: tmpDir, filePaths: [filePath], minRefactorScore: 0 });
+
+    const message = execSync("git log -1 --format=%B", { cwd: tmpDir }).toString();
+    const subject = message.split("\n")[0];
+    expect(subject).toBe("refactor(sample.js): add — untyped-signature");
+    expect(message).toContain("Automated by autorefactor-ai");
+    expect(message).toContain("Verified: type check, lint.");
+    expect(message).not.toContain("JSDoc"); // the prompt guidance must not leak into the git log
+    expect(message.length).toBeLessThan(300);
+  });
 });

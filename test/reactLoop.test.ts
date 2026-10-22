@@ -26,7 +26,7 @@ describe("redactSecrets", () => {
     expect(redactSecrets('headers: { Authorization: "Bearer abc123.def456.ghi789xyz" }')).not.toContain("abc123.def456.ghi789xyz");
   });
   it("does NOT alter ordinary code with no secrets in it", () => {
-    const original = fs.readFileSync(path.resolve("test-target/src/mathUtils.js"), "utf-8");
+    const original = fs.readFileSync(path.resolve("test/fixtures/legacy/mathUtils.js"), "utf-8");
     expect(redactSecrets(original)).toBe(original);
   });
 });

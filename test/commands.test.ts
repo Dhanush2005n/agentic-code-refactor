@@ -6,7 +6,7 @@ import { execSync } from "node:child_process";
 import { buildProgram, formatAnalysis } from "../src/cli/commands.js";
 
 describe("formatAnalysis", () => {
-  const output = formatAnalysis(path.resolve("test-target/src"));
+  const output = formatAnalysis(path.resolve("test/fixtures/legacy"));
 
   it("lists the production files but not the test files", () => {
     expect(output).toContain("mathUtils.js");
@@ -32,13 +32,13 @@ describe("formatAnalysis", () => {
 
   it("with a threshold of 0, schedules more tasks than the default", () => {
     const count = (text: string) => Number(/(\d+) task\(s\) would run/.exec(text)![1]);
-    expect(count(formatAnalysis(path.resolve("test-target/src"), 0))).toBeGreaterThan(count(output));
+    expect(count(formatAnalysis(path.resolve("test/fixtures/legacy"), 0))).toBeGreaterThan(count(output));
   });
 });
 
 describe("buildProgram", () => {
-  it("registers the analyze and run commands", () => {
-    expect(buildProgram().commands.map((c) => c.name()).sort()).toEqual(["analyze", "run"]);
+  it("registers the analyze, check-llm and run commands", () => {
+    expect(buildProgram().commands.map((c) => c.name()).sort()).toEqual(["analyze", "check-llm", "run"]);
   });
 
   it("gives run the expected options", () => {
@@ -109,5 +109,17 @@ describe("run command safety checks", () => {
     await run("--no-git", "--max-retries", "abc");
     expect(errors()).toContain("--max-retries");
     expect(process.exitCode).toBe(1);
+  });
+});
+
+describe("check-llm command", () => {
+  it("rejects an unknown tier without calling the LLM", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    process.exitCode = undefined;
+    await buildProgram().parseAsync(["node", "autorefactor", "check-llm", "medium"]);
+    expect(errorSpy.mock.calls.map((c) => String(c[0])).join("\n")).toContain('tier must be "cheap" or "capable"');
+    expect(process.exitCode).toBe(1);
+    errorSpy.mockRestore();
+    process.exitCode = undefined;
   });
 });

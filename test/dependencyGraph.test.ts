@@ -12,7 +12,7 @@ import {
 // backslash-separated paths on Windows, while the graph's keys (sourced from
 // ts-morph) are always forward-slash. Without this, every lookup below would
 // silently fail to match on Windows only — passing on Linux/Mac would hide it.
-const targetPath = (name: string) => normalizePath(path.resolve("test-target/src", name));
+const targetPath = (name: string) => normalizePath(path.resolve("test/fixtures/legacy", name));
 
 describe("buildDependencyGraph + topologicalOrder", () => {
   it("orders mathUtils before userController, since userController requires it", () => {

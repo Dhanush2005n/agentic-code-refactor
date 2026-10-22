@@ -16,7 +16,9 @@ import { aggregateTokenSavings, buildRefactorObjective, estimateTokenSavings } f
 import { getLlmConfigProblem } from "../agent/llmClient.js";
 import { hasUncommittedChanges } from "../vcs/gitManager.js";
 import { runPipeline } from "../index.js";
+import { checkLlm } from "./checkLlm.js";
 import { discoverFiles } from "./fileDiscovery.js";
+import { readPackageVersion } from "./version.js";
 
 /** Plain-text analysis of a target: what's wrong, in what order it would be fixed, and the token estimate. No LLM, no writes. */
 export function formatAnalysis(targetDir: string, threshold: number = DEFAULT_REFACTOR_THRESHOLD): string {
@@ -73,6 +75,7 @@ function parseNumber(label: string, raw: string): number {
 export function buildProgram(): Command {
   const program = new Command();
   program.name("autorefactor").description("Token-efficient agentic refactoring of legacy JS/TS codebases");
+  program.version(readPackageVersion(), "-v, --version", "print the installed version");
 
   program
     .command("analyze <target>")
@@ -85,6 +88,22 @@ export function buildProgram(): Command {
         console.error(chalk.red(`Error: ${(err as Error).message}`));
         process.exitCode = 1;
       }
+    });
+
+  program
+    .command("check-llm [tier]")
+    .description("Make one small test call with your current LLM settings (tier: cheap or capable) and report the result")
+    .action(async (tier?: string) => {
+      if (tier !== undefined && tier !== "cheap" && tier !== "capable") {
+        console.error(chalk.red(`Error: tier must be "cheap" or "capable" (got "${tier}")`));
+        process.exitCode = 1;
+        return;
+      }
+      const ok = await checkLlm(tier ?? "cheap", {
+        info: (m) => console.log(m),
+        error: (m) => console.error(chalk.red(m)),
+      });
+      if (!ok) process.exitCode = 1;
     });
 
   program

@@ -1,24 +1,44 @@
 {
   "name": "autorefactor-ai",
   "version": "0.1.0",
-  "description": "Autonomous agentic codebase refactoring engine using CST parsing, dependency graphs, and self-healing verification loops.",
+  "description": "Token-efficient agentic refactoring CLI: parses legacy JS/TS, plans fixes by dependency order and priority, asks an LLM for minimal patches, verifies them, and commits each verified fix.",
   "type": "module",
   "bin": {
-    "autorefactor": "./bin/autorefactor.ts"
+    "autorefactor": "dist/bin/autorefactor.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    ".env.example"
+  ],
+  "keywords": [
+    "refactoring",
+    "llm",
+    "ai",
+    "cli",
+    "javascript",
+    "typescript",
+    "ast",
+    "tokens",
+    "code-quality"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.18.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "start": "tsx src/index.ts",
+    "build": "node -e \"fs.rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
     "cli": "tsx bin/autorefactor.ts",
-    "dev:server": "tsx src/server/app.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "inspect": "tsx scripts/inspectPipeline.ts",
-    "lint": "eslint . --ext .ts"
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm test",
+    "demo:reset": "tsx scripts/resetDemo.ts"
   },
   "dependencies": {
     "ts-morph": "^23.0.0",
-    "typescript": "^5.5.4",
     "ai": "^4.0.0",
     "@ai-sdk/anthropic": "^1.0.0",
     "@ai-sdk/openai": "^1.0.0",
@@ -26,24 +46,14 @@
     "zod": "^3.23.8",
     "commander": "^12.1.0",
     "chalk": "^5.3.0",
-    "ora": "^8.1.0",
-    "winston": "^3.14.2",
     "simple-git": "^3.27.0",
-    "express": "^4.21.0",
     "dotenv": "^16.4.5",
-    "uuid": "^10.0.0"
+    "eslint": "^9.10.0"
   },
   "devDependencies": {
     "tsx": "^4.19.1",
     "vitest": "^2.1.1",
     "@types/node": "^22.5.5",
-    "@types/express": "^4.17.21",
-    "@types/uuid": "^10.0.0",
-    "eslint": "^9.10.0",
-    "@typescript-eslint/parser": "^8.5.0",
-    "@typescript-eslint/eslint-plugin": "^8.5.0"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "typescript": "^5.5.4"
   }
 }

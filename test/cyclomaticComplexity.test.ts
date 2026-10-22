@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import path from "node:path";
 import { parseFiles } from "../src/parser/astEngine.js";
 
-const targetPath = (name: string) => path.resolve("test-target/src", name);
+const targetPath = (name: string) => path.resolve("test/fixtures/legacy", name);
 
 describe("cyclomatic complexity", () => {
   it("gives a simple branch-free function the baseline complexity of 1", () => {

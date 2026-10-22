@@ -100,7 +100,7 @@ async function load(id, callback) {
 
   it("does not flag the original sample files", async () => {
     for (const name of ["legacyCallback.js", "mathUtils.js", "userController.js"]) {
-      const result = await lintFile(path.resolve("test-target/src", name));
+      const result = await lintFile(path.resolve("test/fixtures/legacy", name));
       expect((result.violations ?? []).filter((v) => v.ruleId === RULE)).toEqual([]);
     }
   });
