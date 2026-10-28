@@ -23,6 +23,7 @@ describe("checkLlm", () => {
     vi.mocked(llm.getLlmConfigProblem).mockReturnValue("GOOGLE_GENERATIVE_AI_API_KEY is not set");
     expect(await checkLlm("cheap", out())).toBe(false);
     expect(error.join("\n")).toContain("GOOGLE_GENERATIVE_AI_API_KEY is not set");
+    expect(error.join("\n")).toContain("Settings were looked for in:");
     expect(llm.generateRefactorPatch).not.toHaveBeenCalled();
   });
 

@@ -17,6 +17,7 @@ import { getLlmConfigProblem } from "../agent/llmClient.js";
 import { hasUncommittedChanges } from "../vcs/gitManager.js";
 import { runPipeline } from "../index.js";
 import { checkLlm } from "./checkLlm.js";
+import { describeConfigHelp } from "./configHelp.js";
 import { discoverFiles } from "./fileDiscovery.js";
 import { readPackageVersion } from "./version.js";
 
@@ -120,7 +121,7 @@ export function buildProgram(): Command {
         if (filePaths.length === 0) throw new Error(`No analyzable .js/.ts files found in ${targetDir}`);
 
         const configProblem = getLlmConfigProblem();
-        if (configProblem) throw new Error(configProblem);
+        if (configProblem) throw new Error(`${configProblem}\n${describeConfigHelp()}`);
 
         if (opts.git) {
           // Refuse to branch off a dirty tree: the fixes would be mixed with the user's own uncommitted work.

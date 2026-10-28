@@ -83,7 +83,9 @@ only estimated.
 | `LLM_MODEL_CHEAP` / `LLM_MODEL_CAPABLE` | model per tier (required for openai/google) | built in for anthropic |
 | `LLM_API_RETRIES` | retries on rate limits / server errors | 5 |
 | `LLM_RETRY_BASE_MS` | first backoff delay, doubles each retry | 2000 |
-| `LLM_TIMEOUT_MS` | cap on one call including retries | 180000 |
+| `LLM_REQUEST_TIMEOUT_MS` | a single request that goes silent is aborted and retried after this long | 90000 |
+| `LLM_TIMEOUT_MS` | overall cap on one call, retries and waits included | 240000 |
+| `LLM_FALLBACK` | set to `off` to disable falling back from the capable model to the cheap one when it stays unavailable | on |
 
 ## Limitations
 
@@ -94,6 +96,7 @@ only estimated.
   (reported as skipped). The `--run-tests` stage supports Jest only.
 - "Impact" is measured per file, not per function.
 - Only the Google provider has been exercised against a live API so far.
+- If the provider is down, a task fails (and is restored) rather than the run; two tasks failing that way in a row stops the run and returns you to your original branch.
 
 ## Development
 

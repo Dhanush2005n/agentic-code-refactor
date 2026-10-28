@@ -33,7 +33,7 @@ export async function runRefactorTask(
     contextSlice: redactSecrets(objective.contextSlice),
   };
   const tier = pickModelTier(node);
-  const toolCall = await generateRefactorPatch(safeObjective, tier, options.priorTurns ?? [], { onRetry: options.onRetry, onUsage: options.onUsage });
+  const toolCall = await generateRefactorPatch(safeObjective, tier, options.priorTurns ?? [], { onRetry: options.onRetry, onUsage: options.onUsage, onFallback: options.onFallback });
   if (toolCall.tool !== "propose_patch") return toolCall;
   // The model is asked to echo these ids but can't be trusted to: a real
   // Gemini reply used taskId "task-1" and targetNodeId "target". The

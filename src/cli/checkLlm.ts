@@ -5,6 +5,7 @@
  * touched. Output goes through callbacks so it can be tested.
  */
 import { describeModel, generateRefactorPatch, getLlmConfigProblem, type ModelTier } from "../agent/llmClient.js";
+import { describeConfigHelp } from "./configHelp.js";
 
 export interface CheckOutput {
   info: (message: string) => void;
@@ -16,6 +17,7 @@ export async function checkLlm(tier: ModelTier, out: CheckOutput): Promise<boole
   const problem = getLlmConfigProblem();
   if (problem) {
     out.error(`Config problem: ${problem}`);
+    out.error(describeConfigHelp());
     return false;
   }
 

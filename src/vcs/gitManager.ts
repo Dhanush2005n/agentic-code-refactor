@@ -37,3 +37,18 @@ export async function hasUncommittedChanges(cwd: string): Promise<boolean> {
   const status = await getGit(cwd).status();
   return !status.isClean();
 }
+
+export async function checkoutBranch(cwd: string, branch: string): Promise<void> {
+  await getGit(cwd).checkout(branch);
+}
+
+/** Force-deletes a local branch (only ever used on the pipeline's own, still-empty working branch). */
+export async function deleteBranch(cwd: string, branch: string): Promise<void> {
+  await getGit(cwd).deleteLocalBranch(branch, true);
+}
+
+/** How many commits `branch` has that `base` doesn't. */
+export async function countCommitsAhead(cwd: string, base: string, branch: string): Promise<number> {
+  const out = await getGit(cwd).raw(["rev-list", "--count", `${base}..${branch}`]);
+  return Number.parseInt(out.trim(), 10) || 0;
+}

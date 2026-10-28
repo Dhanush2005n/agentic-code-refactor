@@ -74,6 +74,7 @@ describe("run command safety checks", () => {
     delete process.env.ANTHROPIC_API_KEY;
     await run("--no-git");
     expect(errors()).toContain("ANTHROPIC_API_KEY");
+    expect(errors()).toContain("Settings were looked for in:"); // the error explains itself
     expect(process.exitCode).toBe(1);
     expect(fs.readFileSync(path.join(tmpDir, "a.js"), "utf-8")).toBe("function add(a, b) {\n  return a + b;\n}\n");
   });

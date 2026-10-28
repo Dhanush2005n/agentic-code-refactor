@@ -108,15 +108,33 @@ export function describeModel(tier: ModelTier): string {
 }
 
 /**
- * Upper bound on ONE call, including all SDK retries/backoff. Without it, a
- * rate-limited free tier can leave the pipeline waiting silently for a very
- * long time. Blank or invalid LLM_TIMEOUT_MS falls back to 180 seconds.
+ * Overall budget for one logical call, across every request, retry and wait.
+ * Blank or invalid LLM_TIMEOUT_MS falls back to 240 seconds.
  */
 function timeoutMs(): number {
   const raw = process.env.LLM_TIMEOUT_MS;
-  if (!raw) return 180_000;
+  if (!raw) return 240_000;
   const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? n : 180_000;
+  return Number.isFinite(n) && n > 0 ? n : 240_000;
+}
+
+/**
+ * Limit for ONE request. A request that goes silent is aborted and retried
+ * instead of silently eating the whole overall budget — which is exactly what
+ * happened against an overloaded model: three fast 503s, then one request that
+ * never answered for the remaining ~160s. Defaults to 90s (a slow-but-healthy
+ * reasoning model took ~52s in practice). LLM_REQUEST_TIMEOUT_MS overrides it.
+ */
+function requestTimeoutMs(): number {
+  const raw = process.env.LLM_REQUEST_TIMEOUT_MS;
+  if (!raw) return 90_000;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 90_000;
+}
+
+/** Falling back from the capable to the cheap model is on unless LLM_FALLBACK=off. */
+function fallbackEnabled(): boolean {
+  return (process.env.LLM_FALLBACK ?? "").trim().toLowerCase() !== "off";
 }
 
 /** Base delay for our own retry backoff (doubles each retry, capped at 60s). */
@@ -138,7 +156,31 @@ export interface TokenUsage {
   completionTokens: number;
 }
 
+/**
+ * The provider could not be reached or kept failing transiently (overload,
+ * server errors, network trouble, stalls) even after retries. Distinct from
+ * errors that will never succeed — a bad key, an unknown model, an exhausted
+ * daily quota — so callers can skip a task and carry on instead of aborting.
+ */
+export class LlmUnavailableError extends Error {
+  constructor(
+    message: string,
+    public readonly tier: ModelTier,
+  ) {
+    super(message);
+    this.name = "LlmUnavailableError";
+  }
+}
+
+export interface FallbackInfo {
+  from: ModelTier;
+  to: ModelTier;
+  reason: string;
+}
+
 export interface CallHooks {
+  /** Called when the capable model stays unavailable and the cheap one is used instead. */
+  onFallback?: (info: FallbackInfo) => void;
   /** Called after each successful call with the provider-reported token counts. */
   onUsage?: (usage: TokenUsage) => void;
   /** Called just before waiting to retry, so the caller can tell the user WHY it is waiting. */
@@ -166,7 +208,13 @@ function classifyApiError(err: unknown): ApiFailure {
   const status = e.statusCode;
   const body = e.responseBody ?? "";
   const detail = (e.message ?? "unknown error").slice(0, 200);
-  const retryable = e.isRetryable === true || (status !== undefined && [408, 409, 429, 500, 502, 503, 504].includes(status));
+  // Network-level failures carry no HTTP status; undici reports them as "fetch failed" with a coded cause.
+  const causeCode = (err as { cause?: { code?: string } }).cause?.code ?? "";
+  const networkTrouble =
+    /fetch failed/i.test(e.message ?? "") ||
+    ["ECONNRESET", "ETIMEDOUT", "EAI_AGAIN", "ENOTFOUND", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_SOCKET"].includes(causeCode);
+  const retryable =
+    e.isRetryable === true || networkTrouble || (status !== undefined && [408, 409, 429, 500, 502, 503, 504].includes(status));
   if (!retryable) return { retryable: false, reason: detail };
 
   if (status === 429 && /limit:\s*0\b/.test(body)) {
@@ -192,7 +240,7 @@ function classifyApiError(err: unknown): ApiFailure {
   if (waitMs === undefined && delayMatch) waitMs = Number(delayMatch[1]) * 1000;
   if (waitMs !== undefined) waitMs = Math.min(waitMs, 120_000);
 
-  const label = status === 429 ? "rate limited (429)" : `server error (${status ?? "network"})`;
+  const label = status === 429 ? "rate limited (429)" : status === undefined ? "network error" : `server error (${status})`;
   return { retryable: true, reason: `${label}: ${detail}`, waitMs };
 }
 
@@ -246,42 +294,100 @@ export async function generateRefactorPatch(
       ? { role: "user" as const, content: buildUserMessage(objective), providerOptions: { anthropic: { cacheControl: { type: "ephemeral" as const } } } }
       : { role: "user" as const, content: buildUserMessage(objective) };
 
-  const limitMs = timeoutMs();
-  const signal = AbortSignal.timeout(limitMs); // one clock for the whole call, retries and waits included
-  const maxRetries = apiRetries();
+  const messages = [systemMessage, userMessage, ...priorTurns];
   try {
-    for (let retry = 0; ; retry++) {
-      try {
-        const { object, usage } = await generateObject({
-          model: getModel(tier),
-          schema: AgentToolCallSchema,
-          maxRetries: 0, // retries are handled below, where they can be reported
-          abortSignal: signal,
-          messages: [systemMessage, userMessage, ...priorTurns],
-        });
-        // Providers that don't report usage give NaN or nothing — skip rather than count garbage.
-        if (usage && Number.isFinite(usage.promptTokens) && Number.isFinite(usage.completionTokens)) {
-          hooks.onUsage?.({ promptTokens: usage.promptTokens, completionTokens: usage.completionTokens });
-        }
-        return object;
-      } catch (err) {
-        const failure = classifyApiError(err);
-        if (failure.fatalMessage) throw new Error(`${describeModel(tier)} ${failure.fatalMessage}`);
-        if (!failure.retryable || retry >= maxRetries) throw err;
-
-        const waitMs = failure.waitMs ?? Math.min(2 ** retry * retryBaseMs(), 60_000);
-        hooks.onRetry?.({ attempt: retry + 1, maxRetries, waitMs, reason: failure.reason });
-        await sleep(waitMs, signal);
-      }
-    }
+    return await callWithRetries(tier, messages, hooks);
   } catch (err) {
-    const name = (err as { name?: string }).name;
-    if (name === "TimeoutError" || name === "AbortError") {
-      throw new Error(
-        `The ${describeModel(tier)} call timed out after ${Math.round(limitMs / 1000)}s. On a free tier this is usually ` +
-          `rate limiting — wait a minute and retry, or raise LLM_TIMEOUT_MS in your .env file.`,
-      );
+    const canFallBack = err instanceof LlmUnavailableError && tier === "capable" && fallbackEnabled() && hasDistinctCheapModel();
+    if (!canFallBack) throw err;
+    hooks.onFallback?.({ from: "capable", to: "cheap", reason: err.message });
+    return callWithRetries("cheap", messages, hooks);
+  }
+}
+
+function hasDistinctCheapModel(): boolean {
+  try {
+    return resolveModelId("cheap") !== resolveModelId("capable");
+  } catch {
+    return false;
+  }
+}
+
+const seconds = (ms: number) => `${Math.round(ms / 100) / 10}s`;
+
+/**
+ * One logical call with our own retry loop (so retries can be reported).
+ * Every request has its own time limit; the whole thing has an overall budget.
+ */
+async function callWithRetries(
+  tier: ModelTier,
+  messages: Array<{ role: "system" | "user" | "assistant"; content: string; providerOptions?: unknown }>,
+  hooks: CallHooks,
+): Promise<AgentToolCall> {
+  const overallMs = timeoutMs();
+  const requestMs = Math.min(requestTimeoutMs(), overallMs);
+  const overall = AbortSignal.timeout(overallMs);
+  const maxRetries = apiRetries();
+  let lastProblem = "none yet";
+
+  const ranOutOfTime = () =>
+    new LlmUnavailableError(
+      `${describeModel(tier)} did not finish within ${seconds(overallMs)} (last problem: ${lastProblem}). ` +
+        `If the provider is just slow, raise LLM_TIMEOUT_MS in your .env file.`,
+      tier,
+    );
+
+  for (let retry = 0; ; retry++) {
+    if (overall.aborted) throw ranOutOfTime();
+
+    // This request stops if it stalls OR if the overall budget runs out.
+    const controller = new AbortController();
+    const onOverallAbort = () => controller.abort();
+    overall.addEventListener("abort", onOverallAbort, { once: true });
+    let stalled = false;
+    const stallTimer = setTimeout(() => {
+      stalled = true;
+      controller.abort();
+    }, requestMs);
+
+    try {
+      const { object, usage } = await generateObject({
+        model: getModel(tier),
+        schema: AgentToolCallSchema,
+        maxRetries: 0, // retries are handled here, where they can be reported
+        abortSignal: controller.signal,
+        messages: messages as never,
+      });
+      // Providers that don't report usage give NaN or nothing — skip rather than count garbage.
+      if (usage && Number.isFinite(usage.promptTokens) && Number.isFinite(usage.completionTokens)) {
+        hooks.onUsage?.({ promptTokens: usage.promptTokens, completionTokens: usage.completionTokens });
+      }
+      return object;
+    } catch (err) {
+      if (overall.aborted) throw ranOutOfTime();
+
+      const failure: { retryable: boolean; reason: string; waitMs?: number; fatalMessage?: string } = stalled
+        ? { retryable: true, reason: `no response after ${seconds(requestMs)}` }
+        : classifyApiError(err);
+
+      if (failure.fatalMessage) throw new Error(`${describeModel(tier)} ${failure.fatalMessage}`);
+      if (!failure.retryable) throw err;
+
+      lastProblem = failure.reason;
+      if (retry >= maxRetries) {
+        throw new LlmUnavailableError(`${describeModel(tier)} is unavailable after ${maxRetries} retries (last problem: ${failure.reason})`, tier);
+      }
+
+      const waitMs = failure.waitMs ?? Math.min(2 ** retry * retryBaseMs(), 60_000);
+      hooks.onRetry?.({ attempt: retry + 1, maxRetries, waitMs, reason: failure.reason });
+      try {
+        await sleep(waitMs, overall);
+      } catch {
+        throw ranOutOfTime();
+      }
+    } finally {
+      clearTimeout(stallTimer);
+      overall.removeEventListener("abort", onOverallAbort);
     }
-    throw err;
   }
 }

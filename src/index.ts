@@ -21,12 +21,12 @@ import { scheduleTasks } from "./planner/taskScheduler.js";
 import { prioritizeTasks, DEFAULT_REFACTOR_THRESHOLD } from "./planner/refactorScore.js";
 import { buildRefactorObjective, estimateTokenSavings, aggregateTokenSavings, type TokenSavingsReport } from "./planner/contextSlicer.js";
 import { runRefactorTask, buildRetryTurns } from "./agent/reactLoop.js";
-import { describeModel, pickModelTier, type ConversationTurn } from "./agent/llmClient.js";
+import { describeModel, LlmUnavailableError, pickModelTier, type ConversationTurn } from "./agent/llmClient.js";
 import { createVerificationProject, typeCheckFile } from "./sandbox/typeChecker.js";
 import { lintFile } from "./sandbox/linterRunner.js";
 import { runTests } from "./sandbox/testRunner.js";
 import { combineStageResults, extractErrorMessages, recordAttempt, shouldRetry, startReflection } from "./sandbox/reflector.js";
-import { createRefactorBranch, commitFile, getCurrentBranch } from "./vcs/gitManager.js";
+import { checkoutBranch, commitFile, countCommitsAhead, createRefactorBranch, deleteBranch, getCurrentBranch } from "./vcs/gitManager.js";
 import { getUnifiedDiff, formatDiffReport, type TaskSummaryEntry } from "./vcs/diffGenerator.js";
 import type { FileParseResult, ParsedNode } from "./types/ast.types.js";
 import type { StageResult, VerificationResult } from "./types/verification.types.js";
@@ -85,6 +85,30 @@ function buildCommitMessage(node: ParsedNode, relativePath: string, ranTests: bo
   ].join("\n");
 }
 
+/** After this many tasks in a row fail because the provider is unavailable, stop: it's down, not just flaky. */
+const MAX_CONSECUTIVE_UNAVAILABLE = 2;
+
+/**
+ * Called when the run is aborted by an error. Leaving the user stranded on an
+ * empty agent branch is a real annoyance (it happened on a first real run), so
+ * switch back to where they started. An empty branch is deleted; one that
+ * already holds verified commits is kept, since that work is worth having.
+ */
+async function leaveWorkingBranch(targetDir: string, baseBranch: string, workingBranch: string, log: (m: string) => void): Promise<void> {
+  try {
+    const ahead = await countCommitsAhead(targetDir, baseBranch, workingBranch);
+    await checkoutBranch(targetDir, baseBranch);
+    if (ahead === 0) {
+      await deleteBranch(targetDir, workingBranch);
+      log(`Run aborted: switched back to ${baseBranch} and removed the empty branch ${workingBranch}.`);
+    } else {
+      log(`Run aborted: switched back to ${baseBranch}. ${ahead} verified fix(es) are kept on ${workingBranch}.`);
+    }
+  } catch (cleanupError) {
+    log(`Run aborted, and cleanup could not switch back to ${baseBranch} (${(cleanupError as Error).message}). You are probably still on ${workingBranch}.`);
+  }
+}
+
 export async function runPipeline(options: PipelineOptions): Promise<PipelineResult> {
   const log = options.onProgress ?? (() => {});
   const maxRetries = options.maxRetries ?? 3;
@@ -111,113 +135,130 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
   const taskOutcomes: TaskSummaryEntry[] = [];
   const tokenReports: TokenSavingsReport[] = [];
 
-  for (const task of tasks) {
-    const file = fileByPath.get(task.filePath)!;
-    const targetNode = file.nodes.find((n) => n.id === task.targetNodeId);
-    if (!targetNode) {
-      const note = "target no longer found (renamed by an earlier fix?)";
-      taskOutcomes.push({ taskId: task.taskId, filePath: task.filePath, passed: false, note });
-      log(`✗ ${task.taskId}: ${note}`);
-      continue;
-    }
+  let consecutiveUnavailable = 0;
+  try {
+    for (const task of tasks) {
+      const file = fileByPath.get(task.filePath)!;
+      const targetNode = file.nodes.find((n) => n.id === task.targetNodeId);
+      if (!targetNode) {
+        const note = "target no longer found (renamed by an earlier fix?)";
+        taskOutcomes.push({ taskId: task.taskId, filePath: task.filePath, passed: false, note });
+        log(`✗ ${task.taskId}: ${note}`);
+        continue;
+      }
 
-    const objective = buildRefactorObjective(task, file);
-    tokenReports.push(estimateTokenSavings(file, objective.contextSlice));
-    log(`→ ${task.taskId}: ${targetNode.name} (${path.basename(task.filePath)}) — ${objective.instruction}`);
+      const objective = buildRefactorObjective(task, file);
+      tokenReports.push(estimateTokenSavings(file, objective.contextSlice));
+      log(`→ ${task.taskId}: ${targetNode.name} (${path.basename(task.filePath)}) — ${objective.instruction}`);
 
-    const snapshot = fs.readFileSync(task.filePath, "utf-8");
-    let reflection = startReflection(task.taskId, maxRetries);
-    let priorTurns: ConversationTurn[] = [];
-    let verified = false;
-    let note: string | undefined;
+      const snapshot = fs.readFileSync(task.filePath, "utf-8");
+      let reflection = startReflection(task.taskId, maxRetries);
+      let priorTurns: ConversationTurn[] = [];
+      let verified = false;
+      let note: string | undefined;
 
-    try {
-      // Station 4 + 5: generate a patch, apply it, verify it; retry with real
-      // error feedback on failure, up to maxRetries.
-      do {
-        log(`   asking ${describeModel(pickModelTier(targetNode))} for a patch (attempt ${reflection.attempts.length + 1})...`);
-        const askedAt = Date.now();
-        // A heartbeat, so a slow (not failed) model call never looks like a freeze.
-        const heartbeat = setInterval(() => log(`   ...still waiting (${Math.round((Date.now() - askedAt) / 1000)}s)`), 15_000);
-        let toolCall: Awaited<ReturnType<typeof runRefactorTask>>;
-        let callUsage: { promptTokens: number; completionTokens: number } | undefined;
-        try {
+      try {
+        // Station 4 + 5: generate a patch, apply it, verify it; retry with real
+        // error feedback on failure, up to maxRetries.
+        do {
+          log(`   asking ${describeModel(pickModelTier(targetNode))} for a patch (attempt ${reflection.attempts.length + 1})...`);
+          const askedAt = Date.now();
+          // A heartbeat, so a slow (not failed) model call never looks like a freeze.
+          const heartbeat = setInterval(() => log(`   ...still waiting (${Math.round((Date.now() - askedAt) / 1000)}s)`), 15_000);
+          let toolCall: Awaited<ReturnType<typeof runRefactorTask>>;
+          let callUsage: { promptTokens: number; completionTokens: number } | undefined;
+          try {
+            // eslint-disable-next-line no-await-in-loop
+            toolCall = await runRefactorTask(objective, targetNode, {
+              priorTurns,
+              onRetry: (r) => log(`   ⏳ ${r.reason} — waiting ${Math.ceil(r.waitMs / 1000)}s (retry ${r.attempt}/${r.maxRetries})`),
+              onUsage: (u) => {
+                actualUsage.calls += 1;
+                actualUsage.promptTokens += u.promptTokens;
+                actualUsage.completionTokens += u.completionTokens;
+                callUsage = u;
+              },
+              onFallback: (f) => log(`   ⚠ ${f.from} model unavailable — falling back to the ${f.to} model (${describeModel(f.to)})`),
+            });
+          } finally {
+            clearInterval(heartbeat);
+          }
+          consecutiveUnavailable = 0; // the provider answered
+          const usedNote = callUsage ? ` — ${callUsage.promptTokens} in / ${callUsage.completionTokens} out tokens` : "";
+          log(`   got "${toolCall.tool}" after ${((Date.now() - askedAt) / 1000).toFixed(1)}s${usedNote}`);
+
+          if (toolCall.tool !== "propose_patch") {
+            note = `agent ${toolCall.tool === "abort_task" ? "aborted" : "requested more context"}: ${toolCall.payload.reason}`;
+            break;
+          }
+
+          const patch = toolCall.payload;
+
+          // Every attempt starts from the original file, never from a failed attempt.
+          if (reflection.attempts.length > 0) fs.writeFileSync(task.filePath, snapshot);
+
+          // A fresh project with ONLY the target file loaded fresh from disk.
+          const patchProject = createProject();
+          patchProject.addSourceFileAtPath(task.filePath);
           // eslint-disable-next-line no-await-in-loop
-          toolCall = await runRefactorTask(objective, targetNode, {
-            priorTurns,
-            onRetry: (r) => log(`   ⏳ ${r.reason} — waiting ${Math.ceil(r.waitMs / 1000)}s (retry ${r.attempt}/${r.maxRetries})`),
-            onUsage: (u) => {
-              actualUsage.calls += 1;
-              actualUsage.promptTokens += u.promptTokens;
-              actualUsage.completionTokens += u.completionTokens;
-              callUsage = u;
-            },
-          });
-        } finally {
-          clearInterval(heartbeat);
+          const applyResult = await applyPatch(patchProject, targetNode, patch.newSourceText);
+          if (!applyResult.applied) {
+            note = applyResult.reason;
+            reflection = recordAttempt(reflection, patch, [applyResult.reason ?? "Could not apply patch"], false);
+            break;
+          }
+
+          // eslint-disable-next-line no-await-in-loop
+          const verification = await verifyTask(task.filePath, options.targetDir, options.runTestSuite ?? false);
+          verified = verification.overallPassed;
+          for (const stage of verification.stages.filter((st) => st.skipped)) log(`   ⚠ ${stage.rawOutput}`);
+          const errors = verified ? [] : extractErrorMessages(verification);
+          reflection = recordAttempt(reflection, patch, errors, verified);
+          log(`   attempt ${reflection.attempts.length}: ${verified ? "verified" : `failed (${errors.length} error(s))`}`);
+
+          if (!verified && shouldRetry(reflection)) {
+            priorTurns = buildRetryTurns(patch, errors);
+          }
+        } while (!verified && shouldRetry(reflection));
+      } catch (err) {
+        // A provider outage fails THIS task, not the run — unless it keeps happening.
+        if (!(err instanceof LlmUnavailableError)) throw err;
+        note = err.message;
+        consecutiveUnavailable += 1;
+        if (consecutiveUnavailable >= MAX_CONSECUTIVE_UNAVAILABLE) {
+          log(`✗ ${task.taskId}: ${note}`);
+          throw new Error(`Stopping: ${consecutiveUnavailable} tasks in a row failed because the LLM is unavailable. ${note}`);
         }
-        const usedNote = callUsage ? ` — ${callUsage.promptTokens} in / ${callUsage.completionTokens} out tokens` : "";
-        log(`   got "${toolCall.tool}" after ${((Date.now() - askedAt) / 1000).toFixed(1)}s${usedNote}`);
-
-        if (toolCall.tool !== "propose_patch") {
-          note = `agent ${toolCall.tool === "abort_task" ? "aborted" : "requested more context"}: ${toolCall.payload.reason}`;
-          break;
+      } finally {
+        // Whatever happened — including an exception from the LLM call — never
+        // leave an unverified patch on disk.
+        if (!verified && fs.readFileSync(task.filePath, "utf-8") !== snapshot) {
+          fs.writeFileSync(task.filePath, snapshot);
+          log(`   restored ${path.basename(task.filePath)} to its original state`);
         }
+      }
 
-        const patch = toolCall.payload;
+      if (!verified && !note) note = `verification failed after ${reflection.attempts.length} attempt(s)`;
+      taskOutcomes.push({ taskId: task.taskId, filePath: task.filePath, passed: verified, note });
+      log(`${verified ? "✓" : "✗"} ${task.taskId}${note ? `: ${note}` : ""}`);
 
-        // Every attempt starts from the original file, never from a failed attempt.
-        if (reflection.attempts.length > 0) fs.writeFileSync(task.filePath, snapshot);
-
-        // A fresh project with ONLY the target file loaded fresh from disk.
-        const patchProject = createProject();
-        patchProject.addSourceFileAtPath(task.filePath);
-        // eslint-disable-next-line no-await-in-loop
-        const applyResult = await applyPatch(patchProject, targetNode, patch.newSourceText);
-        if (!applyResult.applied) {
-          note = applyResult.reason;
-          reflection = recordAttempt(reflection, patch, [applyResult.reason ?? "Could not apply patch"], false);
-          break;
+      if (verified) {
+        if (!options.skipGit) {
+          // eslint-disable-next-line no-await-in-loop
+          await commitFile(
+            options.targetDir,
+            path.relative(options.targetDir, task.filePath),
+            buildCommitMessage(targetNode, path.relative(options.targetDir, task.filePath), options.runTestSuite ?? false),
+          );
         }
-
-        // eslint-disable-next-line no-await-in-loop
-        const verification = await verifyTask(task.filePath, options.targetDir, options.runTestSuite ?? false);
-        verified = verification.overallPassed;
-        for (const stage of verification.stages.filter((st) => st.skipped)) log(`   ⚠ ${stage.rawOutput}`);
-        const errors = verified ? [] : extractErrorMessages(verification);
-        reflection = recordAttempt(reflection, patch, errors, verified);
-        log(`   attempt ${reflection.attempts.length}: ${verified ? "verified" : `failed (${errors.length} error(s))`}`);
-
-        if (!verified && shouldRetry(reflection)) {
-          priorTurns = buildRetryTurns(patch, errors);
-        }
-      } while (!verified && shouldRetry(reflection));
-    } finally {
-      // Whatever happened — including an exception from the LLM call — never
-      // leave an unverified patch on disk.
-      if (!verified && fs.readFileSync(task.filePath, "utf-8") !== snapshot) {
-        fs.writeFileSync(task.filePath, snapshot);
-        log(`   restored ${path.basename(task.filePath)} to its original state`);
+        // Later tasks in this file must see the code as it is now.
+        const [fresh] = parseFiles([task.filePath]);
+        fileByPath.set(task.filePath, fresh);
       }
     }
-
-    if (!verified && !note) note = `verification failed after ${reflection.attempts.length} attempt(s)`;
-    taskOutcomes.push({ taskId: task.taskId, filePath: task.filePath, passed: verified, note });
-    log(`${verified ? "✓" : "✗"} ${task.taskId}${note ? `: ${note}` : ""}`);
-
-    if (verified) {
-      if (!options.skipGit) {
-        // eslint-disable-next-line no-await-in-loop
-        await commitFile(
-          options.targetDir,
-          path.relative(options.targetDir, task.filePath),
-          buildCommitMessage(targetNode, path.relative(options.targetDir, task.filePath), options.runTestSuite ?? false),
-        );
-      }
-      // Later tasks in this file must see the code as it is now.
-      const [fresh] = parseFiles([task.filePath]);
-      fileByPath.set(task.filePath, fresh);
-    }
+  } catch (err) {
+    if (baseBranch && workingBranch) await leaveWorkingBranch(options.targetDir, baseBranch, workingBranch, log);
+    throw err;
   }
 
   const tokenSavings = aggregateTokenSavings(tokenReports);

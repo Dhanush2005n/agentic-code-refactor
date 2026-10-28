@@ -195,16 +195,6 @@ describe("generateRefactorPatch — default provider (anthropic)", () => {
     expect(generateObject).toHaveBeenCalledTimes(1);
   });
 
-  it("applies the overall timeout to the waiting between retries too, not just the calls", async () => {
-    process.env.LLM_TIMEOUT_MS = "30";
-    process.env.LLM_RETRY_BASE_MS = "5000"; // would wait 5s if the timeout didn't cut it short
-    vi.mocked(generateObject).mockRejectedValue(apiError(429));
-    const { generateRefactorPatch } = await import("../src/agent/llmClient.js");
-    const started = Date.now();
-    await expect(generateRefactorPatch(objective, "cheap")).rejects.toThrow(/timed out/);
-    expect(Date.now() - started).toBeLessThan(2000);
-  });
-
   it("passes an abort signal so a stuck call can't hang the pipeline forever", async () => {
     vi.mocked(generateObject).mockResolvedValue({ object: { tool: "abort_task", payload: { reason: "x" } } } as any);
     const { generateRefactorPatch } = await import("../src/agent/llmClient.js");
@@ -212,16 +202,120 @@ describe("generateRefactorPatch — default provider (anthropic)", () => {
     expect((vi.mocked(generateObject).mock.calls[0][0] as any).abortSignal).toBeInstanceOf(AbortSignal);
   });
 
-  it("turns a timeout into an actionable message naming the model and LLM_TIMEOUT_MS", async () => {
-    process.env.LLM_TIMEOUT_MS = "90000";
-    vi.mocked(generateObject).mockRejectedValue(Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" }));
+  // A fake model call that never answers until it is aborted — what a stalled server looks like.
+  const hangsUntilAborted = (args: any) =>
+    new Promise((_, reject) => args.abortSignal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" }))));
+  const unavailableApiError = () => apiError(503, { message: "This model is currently experiencing high demand." });
+
+  it("aborts a request that goes silent and retries it, instead of letting it eat the whole budget", async () => {
+    process.env.LLM_REQUEST_TIMEOUT_MS = "40";
+    vi.mocked(generateObject).mockImplementationOnce(hangsUntilAborted as any).mockResolvedValueOnce(okResponse);
+    const onRetry = vi.fn();
     const { generateRefactorPatch } = await import("../src/agent/llmClient.js");
-    const attempt = generateRefactorPatch({ taskId: "t", targetNodeId: "n", instruction: "x", contextSlice: "y" }, "cheap");
-    await expect(attempt).rejects.toThrow(/timed out after 90s/);
-    await expect(attempt).rejects.toThrow(/LLM_TIMEOUT_MS/);
+
+    const result = await generateRefactorPatch(objective, "cheap", [], { onRetry });
+
+    expect(result).toEqual(okResponse.object);
+    expect(generateObject).toHaveBeenCalledTimes(2);
+    expect(onRetry.mock.calls[0][0].reason).toContain("no response after");
   });
 
-  it("rethrows non-timeout errors untouched", async () => {
+  it("gives up with LlmUnavailableError once the overall budget runs out, naming the last real problem", async () => {
+    process.env.LLM_TIMEOUT_MS = "60";
+    process.env.LLM_RETRY_BASE_MS = "5000"; // would wait 5s between retries if the budget didn't cut it short
+    vi.mocked(generateObject).mockRejectedValue(unavailableApiError());
+    const { generateRefactorPatch, LlmUnavailableError } = await import("../src/agent/llmClient.js");
+    const started = Date.now();
+
+    const failure = await generateRefactorPatch(objective, "cheap").catch((e) => e);
+
+    expect(failure).toBeInstanceOf(LlmUnavailableError);
+    expect(failure.message).toContain("did not finish within");
+    expect(failure.message).toContain("server error (503)"); // the REAL last problem, not a guess about rate limiting
+    expect(failure.message).toContain("LLM_TIMEOUT_MS");
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it("throws LlmUnavailableError, not a bare API error, when retries are exhausted on a transient failure", async () => {
+    process.env.LLM_API_RETRIES = "1";
+    vi.mocked(generateObject).mockRejectedValue(unavailableApiError());
+    const { generateRefactorPatch, LlmUnavailableError } = await import("../src/agent/llmClient.js");
+    const failure = await generateRefactorPatch(objective, "cheap").catch((e) => e);
+    expect(failure).toBeInstanceOf(LlmUnavailableError);
+    expect(failure.message).toContain("unavailable after 1 retries");
+    expect(failure.message).toContain("server error (503)");
+  });
+
+  it("treats a dropped connection (fetch failed) as retryable", async () => {
+    vi.mocked(generateObject)
+      .mockRejectedValueOnce(Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNRESET" } }))
+      .mockResolvedValueOnce(okResponse);
+    const onRetry = vi.fn();
+    const { generateRefactorPatch } = await import("../src/agent/llmClient.js");
+    await generateRefactorPatch(objective, "cheap", [], { onRetry });
+    expect(generateObject).toHaveBeenCalledTimes(2);
+    expect(onRetry.mock.calls[0][0].reason).toContain("network error");
+  });
+
+  describe("falling back from the capable model to the cheap one", () => {
+    // The capable (sonnet) model is down; the cheap (haiku) model is healthy.
+    const capableDown = (args: any) =>
+      String(args.model.modelId).includes("sonnet") ? Promise.reject(unavailableApiError()) : Promise.resolve(okResponse);
+
+    beforeEach(() => {
+      process.env.LLM_API_RETRIES = "1";
+      vi.mocked(generateObject).mockImplementation(capableDown as any);
+    });
+
+    it("uses the cheap model when the capable one stays unavailable, and says so", async () => {
+      const onFallback = vi.fn();
+      const { generateRefactorPatch } = await import("../src/agent/llmClient.js");
+
+      const result = await generateRefactorPatch(objective, "capable", [], { onFallback });
+
+      expect(result).toEqual(okResponse.object);
+      expect(onFallback).toHaveBeenCalledTimes(1);
+      expect(onFallback.mock.calls[0][0]).toMatchObject({ from: "capable", to: "cheap" });
+      const modelsTried = vi.mocked(generateObject).mock.calls.map((c) => String((c[0] as any).model.modelId));
+      expect(modelsTried.some((m) => m.includes("sonnet"))).toBe(true);
+      expect(modelsTried[modelsTried.length - 1]).toContain("haiku");
+    });
+
+    it("does not fall back when LLM_FALLBACK=off", async () => {
+      process.env.LLM_FALLBACK = "off";
+      const { generateRefactorPatch, LlmUnavailableError } = await import("../src/agent/llmClient.js");
+      await expect(generateRefactorPatch(objective, "capable")).rejects.toBeInstanceOf(LlmUnavailableError);
+      expect(vi.mocked(generateObject).mock.calls.every((c) => String((c[0] as any).model.modelId).includes("sonnet"))).toBe(true);
+    });
+
+    it("does not fall back from the cheap tier (there is nothing cheaper)", async () => {
+      vi.mocked(generateObject).mockRejectedValue(unavailableApiError());
+      const onFallback = vi.fn();
+      const { generateRefactorPatch, LlmUnavailableError } = await import("../src/agent/llmClient.js");
+      await expect(generateRefactorPatch(objective, "cheap", [], { onFallback })).rejects.toBeInstanceOf(LlmUnavailableError);
+      expect(onFallback).not.toHaveBeenCalled();
+    });
+
+    it("does not fall back when both tiers are the same model", async () => {
+      process.env.LLM_MODEL_CHEAP = "same-model";
+      process.env.LLM_MODEL_CAPABLE = "same-model";
+      vi.mocked(generateObject).mockRejectedValue(unavailableApiError());
+      const onFallback = vi.fn();
+      const { generateRefactorPatch, LlmUnavailableError } = await import("../src/agent/llmClient.js");
+      await expect(generateRefactorPatch(objective, "capable", [], { onFallback })).rejects.toBeInstanceOf(LlmUnavailableError);
+      expect(onFallback).not.toHaveBeenCalled();
+    });
+
+    it("does not fall back for errors that waiting on another model can't fix, like a bad request", async () => {
+      vi.mocked(generateObject).mockRejectedValue(apiError(400));
+      const onFallback = vi.fn();
+      const { generateRefactorPatch } = await import("../src/agent/llmClient.js");
+      await expect(generateRefactorPatch(objective, "capable", [], { onFallback })).rejects.toThrow("HTTP 400");
+      expect(onFallback).not.toHaveBeenCalled();
+    });
+  });
+
+  it("rethrows errors that retrying cannot fix, untouched", async () => {
     vi.mocked(generateObject).mockRejectedValue(new Error("Quota exceeded"));
     const { generateRefactorPatch } = await import("../src/agent/llmClient.js");
     await expect(generateRefactorPatch({ taskId: "t", targetNodeId: "n", instruction: "x", contextSlice: "y" }, "cheap")).rejects.toThrow("Quota exceeded");

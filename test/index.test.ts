@@ -11,6 +11,7 @@ vi.mock("../src/agent/reactLoop.js", async () => {
 
 const { runRefactorTask } = await import("../src/agent/reactLoop.js");
 const { runPipeline } = await import("../src/index.js");
+const llmClientModule = await import("../src/agent/llmClient.js");
 
 let tmpDir: string;
 let filePath: string;
@@ -310,5 +311,107 @@ describe("runPipeline — end to end (LLM call mocked, everything else real)", (
     expect(message).toContain("Verified: type check, lint.");
     expect(message).not.toContain("JSDoc"); // the prompt guidance must not leak into the git log
     expect(message.length).toBeLessThan(300);
+  });
+
+  describe("when the LLM provider is unavailable", () => {
+    const { LlmUnavailableError } = llmClientModule;
+    const down = () => new LlmUnavailableError("gemini-x is unavailable after 5 retries (last problem: server error (503))", "capable");
+    const names = (n: number) => Array.from({ length: n }, (_, i) => `f${i + 1}`);
+    const writeMulti = (n: number) => {
+      const file = path.join(tmpDir, "multi.js");
+      fs.writeFileSync(file, names(n).map((f) => `function ${f}(x) {\n  return x;\n}\n`).join("\n"));
+      execSync("git add . && git commit -q -m multi", { cwd: tmpDir });
+      return file;
+    };
+    const goodPatchFor = (targetNodeId: string) => {
+      const name = targetNodeId.split("::")[1];
+      return {
+        tool: "propose_patch" as const,
+        payload: { taskId: "t", targetNodeId, newSourceText: `function ${name}(x) {\n  return x; // ok\n}`, explanation: "x" },
+      };
+    };
+    const branchesNow = () => execSync('git branch --list "agent/*"', { cwd: tmpDir }).toString().trim();
+    const currentBranch = () => execSync("git rev-parse --abbrev-ref HEAD", { cwd: tmpDir }).toString().trim();
+
+    it("fails only that task, notes why, restores the file, and carries on with the next one", async () => {
+      const file = writeMulti(2);
+      let call = 0;
+      vi.mocked(runRefactorTask).mockImplementation(async (objective) => {
+        call += 1;
+        if (call === 1) throw down();
+        return goodPatchFor(objective.targetNodeId);
+      });
+
+      const result = await runPipeline({ targetDir: tmpDir, filePaths: [file], minRefactorScore: 0, skipGit: true });
+
+      expect(result.taskOutcomes.map((t) => t.passed)).toEqual([false, true]);
+      expect(result.taskOutcomes[0].note).toContain("unavailable after 5 retries");
+      const text = fs.readFileSync(file, "utf-8");
+      expect(text).toContain("function f1(x) {\n  return x;\n}"); // untouched
+      expect(text).toContain("function f2(x) {\n  return x; // ok\n}"); // fixed
+    });
+
+    it("does not count outages that are separated by a success as 'in a row'", async () => {
+      const file = writeMulti(4);
+      let call = 0;
+      vi.mocked(runRefactorTask).mockImplementation(async (objective) => {
+        call += 1;
+        if (call % 2 === 1) throw down(); // down, ok, down, ok
+        return goodPatchFor(objective.targetNodeId);
+      });
+
+      const result = await runPipeline({ targetDir: tmpDir, filePaths: [file], minRefactorScore: 0, skipGit: true });
+
+      expect(result.taskOutcomes.map((t) => t.passed)).toEqual([false, true, false, true]);
+    });
+
+    it("stops after two outages in a row, switches back, and removes the empty branch it created", async () => {
+      const file = writeMulti(3);
+      const startBranch = currentBranch();
+      vi.mocked(runRefactorTask).mockRejectedValue(down());
+      const messages: string[] = [];
+
+      await expect(
+        runPipeline({ targetDir: tmpDir, filePaths: [file], minRefactorScore: 0, onProgress: (m) => messages.push(m) }),
+      ).rejects.toThrow(/2 tasks in a row failed because the LLM is unavailable/);
+
+      expect(runRefactorTask).toHaveBeenCalledTimes(2); // did not grind through the third task
+      expect(currentBranch()).toBe(startBranch);
+      expect(branchesNow()).toBe("");
+      expect(messages.some((m) => m.includes("removed the empty branch"))).toBe(true);
+      expect(execSync("git status --porcelain", { cwd: tmpDir }).toString().trim()).toBe("");
+    });
+
+    it("on abort, switches back but KEEPS the branch when it already holds verified commits", async () => {
+      const file = writeMulti(3);
+      const startBranch = currentBranch();
+      let call = 0;
+      vi.mocked(runRefactorTask).mockImplementation(async (objective) => {
+        call += 1;
+        if (call === 1) return goodPatchFor(objective.targetNodeId);
+        throw down();
+      });
+      const messages: string[] = [];
+
+      await expect(
+        runPipeline({ targetDir: tmpDir, filePaths: [file], minRefactorScore: 0, onProgress: (m) => messages.push(m) }),
+      ).rejects.toThrow(/in a row/);
+
+      expect(currentBranch()).toBe(startBranch);
+      const kept = branchesNow();
+      expect(kept).toMatch(/agent\/refactor-/);
+      expect(execSync(`git log ${kept.replace("* ", "").trim()} --oneline`, { cwd: tmpDir }).toString()).toContain("refactor(multi.js)");
+      expect(messages.some((m) => m.includes("1 verified fix(es) are kept"))).toBe(true);
+    });
+
+    it("tells the user when it falls back to the cheap model", async () => {
+      vi.mocked(runRefactorTask).mockImplementation(async (_o, _n, options) => {
+        options?.onFallback?.({ from: "capable", to: "cheap", reason: "gemini-x is unavailable" });
+        return goodPatchFor(`${filePath}::add`);
+      });
+      const messages: string[] = [];
+      await runPipeline({ targetDir: tmpDir, filePaths: [filePath], minRefactorScore: 0, skipGit: true, onProgress: (m) => messages.push(m) });
+      expect(messages.some((m) => m.includes("falling back to the cheap model"))).toBe(true);
+    });
   });
 });

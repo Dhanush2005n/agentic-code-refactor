@@ -3,7 +3,15 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { execSync } from "node:child_process";
-import { commitFile, createRefactorBranch, getCurrentBranch, hasUncommittedChanges } from "../src/vcs/gitManager.js";
+import {
+  checkoutBranch,
+  commitFile,
+  countCommitsAhead,
+  createRefactorBranch,
+  deleteBranch,
+  getCurrentBranch,
+  hasUncommittedChanges,
+} from "../src/vcs/gitManager.js";
 
 let tmpDir: string;
 
@@ -59,5 +67,37 @@ describe("commitFile", () => {
     const hash = await commitFile(tmpDir, "file.js", "Add types");
     expect(hash).toMatch(/^[0-9a-f]{7,40}$/);
     expect(await hasUncommittedChanges(tmpDir)).toBe(false);
+  });
+});
+
+describe("checkoutBranch / deleteBranch / countCommitsAhead", () => {
+  it("switches back to the original branch and deletes an empty working branch", async () => {
+    const base = await getCurrentBranch(tmpDir);
+    const work = await createRefactorBranch(tmpDir, "x");
+    expect(await countCommitsAhead(tmpDir, base, work)).toBe(0);
+
+    await checkoutBranch(tmpDir, base);
+    await deleteBranch(tmpDir, work);
+
+    expect(await getCurrentBranch(tmpDir)).toBe(base);
+    expect(execSync('git branch --list "agent/*"', { cwd: tmpDir }).toString().trim()).toBe("");
+  });
+
+  it("counts commits made on the working branch", async () => {
+    const base = await getCurrentBranch(tmpDir);
+    const work = await createRefactorBranch(tmpDir, "x");
+    fs.writeFileSync(path.join(tmpDir, "file.js"), "function add(a, b) { return a - b; }\n");
+    await commitFile(tmpDir, "file.js", "change one");
+    fs.writeFileSync(path.join(tmpDir, "file.js"), "function add(a, b) { return a * b; }\n");
+    await commitFile(tmpDir, "file.js", "change two");
+    expect(await countCommitsAhead(tmpDir, base, work)).toBe(2);
+  });
+
+  it("force-deleting a branch that still has commits works, since the pipeline only deletes branches it has just verified are empty", async () => {
+    const base = await getCurrentBranch(tmpDir);
+    const work = await createRefactorBranch(tmpDir, "x");
+    await checkoutBranch(tmpDir, base);
+    await deleteBranch(tmpDir, work);
+    expect(execSync('git branch --list "agent/*"', { cwd: tmpDir }).toString().trim()).toBe("");
   });
 });
