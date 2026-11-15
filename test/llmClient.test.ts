@@ -411,8 +411,20 @@ describe("generateRefactorPatch — switching providers", () => {
   });
 
   it("getLlmConfigProblem rejects an unrecognized LLM_PROVIDER instead of silently using anthropic", async () => {
-    process.env.LLM_PROVIDER = "gemini";
+    process.env.LLM_PROVIDER = "unsupported_provider";
     const { getLlmConfigProblem } = await import("../src/agent/llmClient.js");
     expect(getLlmConfigProblem()).toContain("LLM_PROVIDER");
+  });
+
+  it("auto-detects Google provider and uses defaults when GEMINI_API_KEY is provided", async () => {
+    delete process.env.LLM_PROVIDER;
+    delete process.env.ANTHROPIC_API_KEY;
+    process.env.GEMINI_API_KEY = "gemini-test-key";
+    delete process.env.LLM_MODEL_CHEAP;
+    delete process.env.LLM_MODEL_CAPABLE;
+    const { getLlmConfigProblem, getProvider, describeModel } = await import("../src/agent/llmClient.js");
+    expect(getProvider()).toBe("google");
+    expect(getLlmConfigProblem()).toBeUndefined();
+    expect(describeModel("cheap")).toContain("google/gemini-2.0-flash");
   });
 });

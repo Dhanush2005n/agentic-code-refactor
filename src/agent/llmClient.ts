@@ -14,28 +14,50 @@ import { SYSTEM_PROMPT, buildUserMessage } from "./prompts.js";
 export type LlmProvider = "anthropic" | "openai" | "google";
 export type ModelTier = "cheap" | "capable";
 
-const PROVIDER = (process.env.LLM_PROVIDER as LlmProvider | undefined) ?? "anthropic";
+export function getProvider(): LlmProvider {
+  const fromEnv = process.env.LLM_PROVIDER as LlmProvider | undefined;
+  if (fromEnv) return fromEnv;
+  if (process.env.GOOGLE_GENERATIVE_AI_API_KEY || process.env.GEMINI_API_KEY) {
+    return "google";
+  }
+  return "anthropic";
+}
 
-const ANTHROPIC_DEFAULTS: Record<ModelTier, string> = {
+export const ANTHROPIC_DEFAULTS: Record<ModelTier, string> = {
   cheap: "claude-haiku-4-5-20251001",
   capable: "claude-sonnet-5",
 };
+
+export const GOOGLE_DEFAULTS: Record<ModelTier, string> = {
+  cheap: "gemini-2.0-flash",
+  capable: "gemini-2.0-flash",
+};
+
+function ensureGoogleKey(): void {
+  if (!process.env.GOOGLE_GENERATIVE_AI_API_KEY && process.env.GEMINI_API_KEY) {
+    process.env.GOOGLE_GENERATIVE_AI_API_KEY = process.env.GEMINI_API_KEY;
+  }
+}
 
 function resolveModelId(tier: ModelTier): string {
   const envVar = tier === "cheap" ? "LLM_MODEL_CHEAP" : "LLM_MODEL_CAPABLE";
   const fromEnv = process.env[envVar];
   if (fromEnv) return fromEnv;
-  if (PROVIDER === "anthropic") return ANTHROPIC_DEFAULTS[tier];
+  const provider = getProvider();
+  if (provider === "anthropic") return ANTHROPIC_DEFAULTS[tier];
+  if (provider === "google") return GOOGLE_DEFAULTS[tier];
   throw new Error(
-    `${envVar} is not set. There is no default model ID for provider "${PROVIDER}" — ` +
-      `model naming changes too often to guess reliably. Check ${PROVIDER}'s current model ` +
+    `${envVar} is not set. There is no default model ID for provider "${provider}" — ` +
+      `model naming changes too often to guess reliably. Check ${provider}'s current model ` +
       `list and set ${envVar} in your .env file.`,
   );
 }
 
 function getModel(tier: ModelTier): LanguageModel {
+  const provider = getProvider();
+  if (provider === "google") ensureGoogleKey();
   const modelId = resolveModelId(tier);
-  switch (PROVIDER) {
+  switch (provider) {
     case "openai":
       return openai(modelId);
     case "google":
@@ -46,8 +68,8 @@ function getModel(tier: ModelTier): LanguageModel {
   }
 }
 
-function requiredApiKeyEnvVar(): string {
-  switch (PROVIDER) {
+function requiredApiKeyEnvVar(provider: LlmProvider = getProvider()): string {
+  switch (provider) {
     case "openai":
       return "OPENAI_API_KEY";
     case "google":
@@ -65,18 +87,20 @@ function requiredApiKeyEnvVar(): string {
  * created or file touched, rather than failing on the first task.
  */
 export function getLlmConfigProblem(): string | undefined {
+  const provider = getProvider();
   const validProviders: string[] = ["anthropic", "openai", "google"];
-  if (!validProviders.includes(PROVIDER)) {
-    return `LLM_PROVIDER must be one of ${validProviders.join(", ")} (got "${PROVIDER}").`;
+  if (!validProviders.includes(provider)) {
+    return `LLM_PROVIDER must be one of ${validProviders.join(", ")} (got "${provider}").`;
   }
-  const keyVar = requiredApiKeyEnvVar();
+  if (provider === "google") ensureGoogleKey();
+  const keyVar = requiredApiKeyEnvVar(provider);
   if (!process.env[keyVar]) {
-    return `${keyVar} is not set (LLM_PROVIDER="${PROVIDER}"). Add it to your .env file — see .env.example.`;
+    return `${keyVar} is not set (LLM_PROVIDER="${provider}"). Add it to your .env file — see .env.example.`;
   }
-  if (PROVIDER !== "anthropic") {
+  if (provider !== "anthropic" && provider !== "google") {
     for (const modelVar of ["LLM_MODEL_CHEAP", "LLM_MODEL_CAPABLE"]) {
       if (!process.env[modelVar]) {
-        return `${modelVar} is not set. ${PROVIDER} has no built-in default model — set it in your .env file.`;
+        return `${modelVar} is not set. ${provider} has no built-in default model — set it in your .env file.`;
       }
     }
   }
@@ -100,10 +124,11 @@ function apiRetries(): number {
 
 /** Human-readable "provider/model" for a tier, for progress output. Never throws. */
 export function describeModel(tier: ModelTier): string {
+  const provider = getProvider();
   try {
-    return `${PROVIDER}/${resolveModelId(tier)}`;
+    return `${provider}/${resolveModelId(tier)}`;
   } catch {
-    return PROVIDER;
+    return provider;
   }
 }
 
@@ -279,18 +304,20 @@ export async function generateRefactorPatch(
   priorTurns: ConversationTurn[] = [],
   hooks: CallHooks = {},
 ): Promise<AgentToolCall> {
-  const apiKeyVar = requiredApiKeyEnvVar();
+  const provider = getProvider();
+  if (provider === "google") ensureGoogleKey();
+  const apiKeyVar = requiredApiKeyEnvVar(provider);
   if (!process.env[apiKeyVar]) {
-    throw new Error(`${apiKeyVar} is not set — required for LLM_PROVIDER="${PROVIDER}". See .env.example.`);
+    throw new Error(`${apiKeyVar} is not set — required for LLM_PROVIDER="${provider}". See .env.example.`);
   }
 
   const systemMessage =
-    PROVIDER === "anthropic"
+    provider === "anthropic"
       ? { role: "system" as const, content: SYSTEM_PROMPT, providerOptions: { anthropic: { cacheControl: { type: "ephemeral" as const } } } }
       : { role: "system" as const, content: SYSTEM_PROMPT };
 
   const userMessage =
-    PROVIDER === "anthropic"
+    provider === "anthropic"
       ? { role: "user" as const, content: buildUserMessage(objective), providerOptions: { anthropic: { cacheControl: { type: "ephemeral" as const } } } }
       : { role: "user" as const, content: buildUserMessage(objective) };
 

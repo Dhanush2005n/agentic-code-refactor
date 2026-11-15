@@ -3,6 +3,14 @@
   "version": "0.1.0",
   "description": "Token-efficient agentic refactoring CLI: parses legacy JS/TS, plans fixes by dependency order and priority, asks an LLM for minimal patches, verifies them, and commits each verified fix.",
   "type": "module",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
   "bin": {
     "autorefactor": "dist/bin/autorefactor.js"
   },

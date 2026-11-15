@@ -3,7 +3,7 @@ import { runCommand } from "../src/sandbox/processRunner.js";
 
 describe("runCommand", () => {
   it("captures stdout and a zero exit code for a successful command", async () => {
-    const result = await runCommand("echo", ["hello world"]);
+    const result = await runCommand(process.execPath, ["-e", "console.log('hello world')"]);
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("hello world");
     expect(result.timedOut).toBe(false);

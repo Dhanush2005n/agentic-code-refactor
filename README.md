@@ -22,18 +22,41 @@ From a clone: `npm install && npm run build && npm link`.
 
 ## Quick start (free Gemini key)
 
-1. Get a key at <https://aistudio.google.com/app/apikey>.
-2. Put settings in `~/.autorefactor/.env` (read from anywhere) or in a `.env`
-   in the folder you run from (takes priority):
+1. Get a free API key at <https://aistudio.google.com/app/apikey>.
+2. Put settings in `~/.autorefactor/.env` (read from anywhere) or in a `.env` in the folder you run from (takes priority):
+   ```bash
+   GEMINI_API_KEY=your-key
+   # Or: GOOGLE_GENERATIVE_AI_API_KEY=your-key
    ```
-   LLM_PROVIDER=google
-   GOOGLE_GENERATIVE_AI_API_KEY=your-key
-   LLM_MODEL_CHEAP=gemini-3.5-flash-lite
-   LLM_MODEL_CAPABLE=gemini-3.8-flash
-   ```
-   Model names change and old ones are retired; confirm them in AI Studio.
+   *(Defaults to `gemini-2.0-flash` automatically. Optional custom models can be set via `LLM_MODEL_CHEAP` / `LLM_MODEL_CAPABLE`)*
 3. `autorefactor check-llm` — confirms the key and model work.
 4. `autorefactor analyze ./src`, then `autorefactor run ./src --no-git`.
+
+## Programmatic API (Importing into your Node.js / TypeScript project)
+
+Install into your project:
+```bash
+npm install autorefactor-ai
+```
+
+Import and use:
+```typescript
+import { runPipeline, formatAnalysis } from "autorefactor-ai";
+
+// 1. Analyze target without changing files or calling LLM
+const analysisText = formatAnalysis("./src");
+console.log(analysisText);
+
+// 2. Run the agentic refactoring pipeline programmatically
+const result = await runPipeline({
+  targetDir: "./",
+  filePaths: ["./src/index.ts", "./src/utils.ts"],
+  skipGit: true, // or false to auto-branch & commit
+  onProgress: (msg) => console.log(msg),
+});
+
+console.log(`Verified tasks: ${result.taskOutcomes.filter(t => t.passed).length}`);
+```
 
 > Free tiers may use your prompts to improve the provider's products. Don't run
 > them on confidential code. Secret-shaped strings (API keys, tokens) are

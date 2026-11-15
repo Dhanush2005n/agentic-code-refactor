@@ -280,3 +280,27 @@ export async function runPipeline(options: PipelineOptions): Promise<PipelineRes
 
   return { branchName: workingBranch, diffReport, taskOutcomes, tokenSavings, actualUsage };
 }
+
+// Re-export public programmatic API
+export { formatAnalysis } from "./cli/commands.js";
+export { checkLlm } from "./cli/checkLlm.js";
+export { discoverFiles } from "./cli/fileDiscovery.js";
+export {
+  getLlmConfigProblem,
+  describeModel,
+  getProvider,
+  GOOGLE_DEFAULTS,
+  ANTHROPIC_DEFAULTS,
+  type LlmProvider,
+  type ModelTier,
+  type CallHooks,
+  type TokenUsage,
+} from "./agent/llmClient.js";
+export { parseFiles, createProject } from "./parser/astEngine.js";
+export { buildDependencyGraph } from "./parser/dependencyGraph.js";
+export { DEFAULT_REFACTOR_THRESHOLD, calculateRefactoringScore } from "./planner/refactorScore.js";
+export type { FileParseResult, ParsedNode, CodeSmell } from "./types/ast.types.js";
+export type { RefactorObjective } from "./types/agent.types.js";
+export type { StageResult, VerificationResult, TestFailure } from "./types/verification.types.js";
+export type { TaskSummaryEntry } from "./vcs/diffGenerator.js";
+export type { TokenSavingsReport } from "./planner/contextSlicer.js";

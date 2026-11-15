@@ -21,7 +21,7 @@ export function describeConfigHelp(
   const providerIsDefault = !env.LLM_PROVIDER;
 
   if (provider === "anthropic" && !env.ANTHROPIC_API_KEY) {
-    if (env.GOOGLE_GENERATIVE_AI_API_KEY) {
+    if (env.GOOGLE_GENERATIVE_AI_API_KEY || env.GEMINI_API_KEY) {
       lines.push('Hint: a Google key is set, but LLM_PROVIDER is not "google", so Anthropic is being used. Add LLM_PROVIDER=google.');
     } else if (env.OPENAI_API_KEY) {
       lines.push('Hint: an OpenAI key is set, but LLM_PROVIDER is not "openai", so Anthropic is being used. Add LLM_PROVIDER=openai.');
